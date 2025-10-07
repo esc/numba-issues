@@ -27,8 +27,11 @@ def fun(
     # But it does not, it's something else
     print("AFTER ", uint64(val))
 
-size = 1024
+size = 2
 arr: NDArray = empty( size, dtype=[("word", uint64),],)
 arr["word"] = rng.integers(low=0, high=2**64, size=size, dtype=uint64)
 
+print("##### NO JIT #####")
+fun.py_func(arr)
+print("##### JIT ENABLED #####")
 fun(arr)
