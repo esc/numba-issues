@@ -14,7 +14,7 @@ def fun(
 ) -> None:
 
   for addr in range(arr.shape[0]):
-    val: uint64 = 0
+    val: uint64 = uint64(0)
 
     op = 1
 
