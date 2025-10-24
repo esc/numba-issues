@@ -24,7 +24,7 @@ def fun(
       val = ~arr[addr]["word"]
       print("BEFORE", uint64(val))
     elif op == OP.INCR:
-      val = arr[addr]["word"] + 0x0100010001000101
+      val = arr[addr]["word"] + uint64(0x0100010001000101)
 
     # The value here should be equal to the value reported in the "BEFORE" print
     # But it does not, it's something else
