@@ -34,7 +34,7 @@ results
 -------
 
 ```
-130 esc@artemis [base] [cpython:v3.14.4~31:★★:bisect] ~/git/cpython git bisect reset && git bisect start && git bisect bad v3.14.4 && git bisect good v3.14.3
+esc@artemis [base] [cpython:v3.14.4~31:★★:bisect] ~/git/cpython git bisect reset && git bisect start && git bisect bad v3.14.4 && git bisect good v3.14.3
 
 Previous HEAD position was 25b48b84b8 [3.14] gh-143050: Correct PyLong_FromString() to use _PyLong_Negate() (GH-145901) (#147331)
 Switched to branch 'VAL'
