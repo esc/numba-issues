@@ -25,17 +25,22 @@ that observes `_depth != 0` (because the counter is now skewed) will not
 re-set `_ts` -- so when `on_end` later drops to 0 and reads `self._ts`,
 the attribute may have been deleted, never set, or stale.
 
-This script drives that path two ways:
+This script drives that path several ways:
 
     --mode=direct   pure event-API stress (no compile, fastest)
     --mode=compile  many distinct @jit kernels compiled in parallel
-    --mode=both     run both back to back
+    --mode=op       OP's two pytest-run-parallel reproducers, ported to
+                    plain threads (issue #10564 follow-up comment):
+                      1. install_timer + global_compiler_lock loop
+                      2. shared TimingListener.notify(start/end) loop
+    --mode=all      run direct, compile, and op back to back
 
 Usage examples:
 
     python repro_10564.py
+    python repro_10564.py --mode=op -t 8
     python repro_10564.py --mode=compile -t 64 -n 200
-    PYTHON_GIL=0 python3.14t repro_10564.py -t 64 -n 20000
+    PYTHON_GIL=0 python3.14t repro_10564.py --mode=all -t 8
 
 Exit code: 0 = no failures observed (race may still be latent),
            1 = at least one failure reproduced.
@@ -198,6 +203,83 @@ def run_compile(nthreads: int, iterations: int) -> list[Failure]:
     return collect_failures(worker, nthreads, iterations, "compile")
 
 
+# ---------------------------------------------------------------------- op ----
+#
+# Ports of the two pytest-run-parallel reproducers from the OP follow-up
+# comment on numba/numba#10564. Translation: `pytest.mark.parallel_threads_limit`
+# becomes a `threading.Thread` count, `thread_index`/`num_parallel_threads`
+# become explicit args, and the post-loop barrier check is preserved.
+
+# OP test 1: install_timer + global_compiler_lock loop.
+def run_op_install_timer(nthreads: int, iterations: int) -> list[Failure]:
+    from numba.core.compiler_lock import global_compiler_lock
+
+    def worker(tid: int, iters: int,
+               failures: list[Failure], flock: threading.Lock) -> None:
+        for i in range(iters):
+            try:
+                with nb_event.install_timer("numba:compiler_lock",
+                                            lambda dur: None):
+                    with global_compiler_lock:
+                        pass
+            except Exception:
+                tb = traceback.format_exc()
+                with flock:
+                    failures.append(Failure("op_install_timer", tid, i, tb))
+                    if len(failures) > 32:
+                        return
+
+    return collect_failures(worker, nthreads, iterations, "op_install_timer")
+
+
+# OP test 2: shared TimingListener.notify(start/end) loop.
+def run_op_shared_listener(nthreads: int, iterations: int) -> list[Failure]:
+    from numba.core.event import Event, EventStatus, TimingListener
+
+    shared_listener = TimingListener()
+    start = Event("numba:compiler_lock", EventStatus.START)
+    end = Event("numba:compiler_lock", EventStatus.END)
+
+    def worker(tid: int, iters: int,
+               failures: list[Failure], flock: threading.Lock) -> None:
+        for i in range(iters):
+            try:
+                shared_listener.notify(start)
+                shared_listener.notify(end)
+            except Exception:
+                tb = traceback.format_exc()
+                with flock:
+                    failures.append(Failure("op_shared_listener", tid, i, tb))
+                    if len(failures) > 32:
+                        return
+
+    failures = collect_failures(worker, nthreads, iterations,
+                                "op_shared_listener")
+
+    # OP's post-loop assertion: depth must be back to zero.
+    final_depth = getattr(shared_listener, "_depth", "<absent>")
+    print(f"[op_shared_listener] listener._depth final = {final_depth}")
+    if final_depth != 0:
+        failures.append(Failure(
+            "op_shared_listener", -1, -1,
+            f"AssertionError: shared_listener._depth == {final_depth} "
+            f"(expected 0)\n",
+        ))
+    return failures
+
+
+def run_op(nthreads: int, iterations: int) -> list[Failure]:
+    """Run both of the OP reproducers in sequence."""
+    # OP used 8 threads; iteration counts default to OP's (20_000 / 200_000)
+    # but scale with -n if the caller bumps it.
+    timer_iters = max(1, iterations // 10)        # OP: 20_000
+    listener_iters = iterations                   # OP: 200_000
+    failures: list[Failure] = []
+    failures.extend(run_op_install_timer(nthreads, timer_iters))
+    failures.extend(run_op_shared_listener(nthreads, listener_iters))
+    return failures
+
+
 # ------------------------------------------------------------------- main ----
 
 def summarize(failures: list[Failure]) -> int:
@@ -230,7 +312,8 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--mode", choices=("direct", "compile", "both"),
+    parser.add_argument("--mode",
+                        choices=("direct", "compile", "op", "all"),
                         default="direct")
     parser.add_argument("-t", "--threads", type=int, default=32)
     parser.add_argument("-n", "--iterations", type=int, default=2000)
@@ -239,12 +322,17 @@ def main() -> int:
     banner()
 
     failures: list[Failure] = []
-    if args.mode in ("direct", "both"):
+    if args.mode in ("direct", "all"):
         failures.extend(run_direct(args.threads, args.iterations))
-    if args.mode in ("compile", "both"):
+    if args.mode in ("compile", "all"):
         # Compiles are far slower than event broadcasts -- divide down.
         compile_iters = max(1, args.iterations // 50)
         failures.extend(run_compile(args.threads, compile_iters))
+    if args.mode in ("op", "all"):
+        # OP used 8 threads with 20_000 / 200_000 iters. Default -n=2000
+        # gives 200 / 2000, plenty to surface the race under 3.14t.
+        # For full OP fidelity: --mode=op -t 8 -n 200000
+        failures.extend(run_op(args.threads, args.iterations))
 
     return summarize(failures)
 
